@@ -1,0 +1,12 @@
+{
+  "name": "agentbreaker",
+  "version": "0.1.0",
+  "description": "A local circuit breaker for autonomous AI agents: caps spend, request loops, file deletions and network egress, then pauses or kills the agent.",
+  "type": "module",
+  "bin": { "agentbreaker": "bin/agentbreaker.js" },
+  "files": ["bin", "src", "policy.example.json"],
+  "scripts": { "test": "NO_PROXY=127.0.0.1,localhost node --test test/*.test.js" },
+  "engines": { "node": ">=20" },
+  "keywords": ["ai-agents", "safety", "circuit-breaker", "guardrails", "claude-code", "budget"],
+  "license": "MIT"
+}

@@ -1,0 +1,45 @@
+{
+  "workspace": ".",
+  "on_trip": "pause",
+  "pause_timeout_s": 600,
+  "notify_command": null,
+  "limits": {
+    "max_usd": 5,
+    "max_usd_per_hour": 2,
+    "max_tokens": null,
+    "max_requests_per_minute": 120,
+    "max_deletes_per_minute": 50,
+    "max_writes_per_minute": 600,
+    "max_upload_mb": 50,
+    "max_blocked_attempts": 5,
+    "max_runtime_minutes": null
+  },
+  "egress": {
+    "mode": "enforce",
+    "allow": [
+      "github.com",
+      "*.githubusercontent.com",
+      "registry.npmjs.org"
+    ]
+  },
+  "protected_paths": [
+    ".env",
+    ".env.*",
+    ".git/config",
+    ".git/hooks/**",
+    ".ssh/**",
+    ".npmrc",
+    ".claude/settings*.json",
+    ".mcp.json"
+  ],
+  "ignore": [
+    ".git/objects",
+    "node_modules",
+    ".agentbreaker"
+  ],
+  "upstreams": {
+    "anthropic": "https://api.anthropic.com",
+    "openai": "https://api.openai.com"
+  },
+  "prices": []
+}
