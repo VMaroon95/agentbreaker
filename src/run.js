@@ -45,7 +45,7 @@ export async function run({ policy, argv, ask, out = (s) => process.stderr.write
     log("trip", trip);
     out(`\n[agentbreaker] TRIPPED: ${trip.reason} (limit ${trip.limit}, value ${trip.value})\n`);
     notify(policy, `agentbreaker tripped: ${trip.reason}`);
-    if (policy.on_trip === "kill") { log("kill", {}); killGroup(child, "SIGKILL"); return; }
+    if (policy.on_trip === "kill") { log("kill", {}); out("[agentbreaker] agent killed (on_trip=kill)\n"); killGroup(child, "SIGKILL"); return; }
     killGroup(child, "SIGSTOP");
     log("paused", {});
     let decision = "kill";
@@ -57,7 +57,7 @@ export async function run({ policy, argv, ask, out = (s) => process.stderr.write
       breaker.resume(); log("resume", {}); out("[agentbreaker] resumed\n");
       killGroup(child, "SIGCONT");
     } else {
-      log("kill", {}); killGroup(child, "SIGCONT"); killGroup(child, "SIGKILL");
+      log("kill", {}); out("[agentbreaker] agent killed\n"); killGroup(child, "SIGCONT"); killGroup(child, "SIGKILL");
     }
     handling = false;
   });

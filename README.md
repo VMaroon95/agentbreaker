@@ -2,6 +2,10 @@
 
 A local circuit breaker for autonomous AI agents. Wrap any agent command; when it overspends, loops, mass-deletes files, touches secrets, or phones an unknown host, AgentBreaker **freezes it** (SIGSTOP) and asks you: resume or kill.
 
+## Install
+
+Not on the npm registry yet. Install from GitHub: `npm install -g github:VMaroon95/agentbreaker`
+
 ```
 agentbreaker init                      # writes agentbreaker.json
 agentbreaker run --policy agentbreaker.json -- claude
@@ -9,6 +13,15 @@ agentbreaker verify-log                # checks the tamper-evident audit log
 ```
 
 Zero dependencies. Node 20+. macOS/Linux. MIT.
+
+Example: an agent writes `.env`, the default policy trips and (non-interactive) kills it.
+
+```
+[agentbreaker] TRIPPED: protected path modified: .env (limit .env, value .env)
+[agentbreaker] agent killed (on_trip=kill)
+```
+
+In a terminal the agent is frozen instead and you are asked to resume or kill.
 
 ## What it watches
 
