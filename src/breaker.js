@@ -8,13 +8,22 @@ export class Breaker extends EventEmitter {
   constructor(policy, now = Date.now) {
     super();
     this.policy = policy;
-    this.now = now;
+    // Never let the clock run backwards (NTP step, VM resume): window arithmetic assumes monotonic time.
+    // On a backwards jump we rebase: time keeps flowing at the real rate from the last value seen.
+    let last = -Infinity, off = 0;
+    this.now = () => {
+      let t = Number(now());
+      if (!Number.isFinite(t)) return last;
+      t += off;
+      if (t < last) { off += last - t; t = last; }
+      return (last = t);
+    };
     this.limits = { ...policy.limits };   // mutable copy: resume() can raise cumulative limits
-    this.started = now();
+    this.started = this.now();
     this.usd = 0; this.tokens = 0; this.uploadBytes = 0; this.blocked = 0;
     this.unpriced = new Set();
     this.win = { requests: [], deletes: [], writes: [], spend: [] };
-    this.protectedRe = policy.protected_paths.map((g) => [g, globToRegExp(g)]);
+    this.protectedRe = policy.protected_paths.map((g) => [g, globToRegExp(g, { caseInsensitive: true })]); // macOS/Windows file systems are case-insensitive: .ENV is .env
     this.ignoreRe = policy.ignore.map((g) => globToRegExp(g.replace(/\/+$/, "") + "/**"));
     this.ignoreExact = policy.ignore.map((g) => globToRegExp(g.replace(/\/+$/, "")));
     this.state = "ok";
@@ -22,8 +31,10 @@ export class Breaker extends EventEmitter {
   }
 
   price(model) {
-    const m = String(model ?? "");
-    return this.policy.prices.find((p) => m.startsWith(p.match)) ?? null;
+    const m = String(model ?? "").toLowerCase();
+    let best = null;   // longest matching prefix wins, so list order cannot make "claude" shadow "claude-opus"
+    for (const p of this.policy.prices) if (m.startsWith(p.match.toLowerCase()) && (!best || p.match.length > best.match.length)) best = p;
+    return best;
   }
 
   isIgnored(rel) {
@@ -52,13 +63,14 @@ export class Breaker extends EventEmitter {
     if (lim && this.#sum(this.win.requests) > lim) this.trip("too many API requests per minute (possible loop)", lim, this.#sum(this.win.requests));
   }
 
-  addUsage({ model, input = 0, output = 0 }) {
-    input = Math.max(0, Number(input) || 0); output = Math.max(0, Number(output) || 0);
+  addUsage({ model, input = 0, output = 0 } = {}) {
+    input = tokenCount(input); output = tokenCount(output);
     this.tokens += input + output;
     const price = this.price(model);
     let cost = 0;
     if (price) cost = (input * price.input_per_mtok + output * price.output_per_mtok) / 1e6;
-    else if (this.limits.max_usd || this.limits.max_usd_per_hour) this.unpriced.add(String(model ?? "unknown"));
+    if (!Number.isFinite(cost)) cost = Number.MAX_VALUE;   // overflow: must still trip, never become NaN/Infinity bookkeeping
+    if (!price && (this.limits.max_usd || this.limits.max_usd_per_hour)) this.unpriced.add(String(model ?? "unknown"));
     this.usd += cost;
     if (cost) { this.win.spend.push({ t: this.now(), n: cost }); this.#slide(this.win.spend, HOUR); }
     const L = this.limits;
@@ -104,7 +116,8 @@ export class Breaker extends EventEmitter {
     if (L.max_usd && this.usd > L.max_usd) L.max_usd = this.usd + base.max_usd;
     if (L.max_tokens && this.tokens > L.max_tokens) L.max_tokens = this.tokens + base.max_tokens;
     if (L.max_upload_mb && this.uploadBytes > L.max_upload_mb * 1048576) L.max_upload_mb = this.uploadBytes / 1048576 + base.max_upload_mb;
-    if (L.max_runtime_minutes && this.now() - this.started > L.max_runtime_minutes * MIN) L.max_runtime_minutes += base.max_runtime_minutes;
+    // Time spent frozen counts as runtime, so grant a full new increment from *now*.
+    if (L.max_runtime_minutes && this.now() - this.started > L.max_runtime_minutes * MIN) L.max_runtime_minutes = (this.now() - this.started) / MIN + base.max_runtime_minutes;
     for (const k of Object.keys(this.win)) this.win[k] = [];
     this.blocked = 0;
     this.state = "ok";
@@ -114,5 +127,11 @@ export class Breaker extends EventEmitter {
   stats() {
     return { usd: round(this.usd), tokens: this.tokens, upload_mb: +(this.uploadBytes / 1048576).toFixed(2), blocked: this.blocked, unpriced_models: [...this.unpriced] };
   }
+}
+// Accept only real, finite, non-negative numbers; Infinity (or absurd values) saturate instead of vanishing as NaN.
+function tokenCount(v) {
+  if (typeof v === "string" && v.trim() !== "") v = Number(v);
+  if (typeof v !== "number" || Number.isNaN(v) || v <= 0) return 0;
+  return Math.min(v, Number.MAX_SAFE_INTEGER);
 }
 const round = (n) => Math.round(n * 10000) / 10000;

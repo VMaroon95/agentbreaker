@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { domainToASCII } from "node:url";
 
 export const DEFAULT_POLICY = {
   workspace: ".",
@@ -24,6 +25,7 @@ export const DEFAULT_POLICY = {
 };
 
 const LIMIT_KEYS = Object.keys(DEFAULT_POLICY.limits);
+const validPrice = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
 const isObj = (v) => v && typeof v === "object" && !Array.isArray(v);
 
 export function normalizePolicy(user = {}) {
@@ -42,18 +44,26 @@ export function normalizePolicy(user = {}) {
       }
     } else if (k === "egress") {
       if (!isObj(user.egress)) throw new Error("egress must be an object");
+      for (const ek of Object.keys(user.egress)) if (!["mode", "allow"].includes(ek)) throw new Error(`unknown egress key: ${ek}`);
       p.egress = { ...p.egress, ...user.egress };
     } else if (k === "upstreams") {
-      p.upstreams = { ...p.upstreams, ...user.upstreams };
+      if (!isObj(user.upstreams)) throw new Error("upstreams must be an object");
+      for (const [name, url] of Object.entries(user.upstreams)) {
+        if (!/^[a-z0-9_-]+$/i.test(name)) throw new Error(`bad upstream name: ${name}`);
+        let u; try { u = new URL(url); } catch { throw new Error(`upstream ${name} must be an http(s) URL`); }
+        if (typeof url !== "string" || !["http:", "https:"].includes(u.protocol)) throw new Error(`upstream ${name} must be an http(s) URL`);
+        p.upstreams[name] = url;
+      }
     } else p[k] = user[k];
   }
   if (!["pause", "kill"].includes(p.on_trip)) throw new Error("on_trip must be pause or kill");
   if (!["enforce", "log"].includes(p.egress.mode)) throw new Error("egress.mode must be enforce or log");
-  if (!(p.pause_timeout_s > 0)) throw new Error("pause_timeout_s must be positive");
+  if (typeof p.workspace !== "string" || !p.workspace) throw new Error("workspace must be a non-empty string");
+  if (!(typeof p.pause_timeout_s === "number" && p.pause_timeout_s > 0 && p.pause_timeout_s <= 2_000_000)) throw new Error("pause_timeout_s must be a positive number (at most 2000000)");
   for (const key of ["protected_paths", "ignore"]) if (!Array.isArray(p[key]) || p[key].some((x) => typeof x !== "string")) throw new Error(`${key} must be a list of strings`);
   if (!Array.isArray(p.egress.allow) || p.egress.allow.some((x) => typeof x !== "string")) throw new Error("egress.allow must be a list of strings");
   if (p.notify_command !== null && (!Array.isArray(p.notify_command) || !p.notify_command.length || p.notify_command.some((x) => typeof x !== "string"))) throw new Error("notify_command must be a non-empty array of strings (no shell)");
-  if (!Array.isArray(p.prices) || p.prices.some((x) => !x || typeof x.match !== "string" || !(x.input_per_mtok >= 0) || !(x.output_per_mtok >= 0))) throw new Error("prices entries need match, input_per_mtok, output_per_mtok");
+  if (!Array.isArray(p.prices) || p.prices.some((x) => !x || typeof x.match !== "string" || !validPrice(x.input_per_mtok) || !validPrice(x.output_per_mtok))) throw new Error("prices entries need match, input_per_mtok, output_per_mtok");
   return p;
 }
 
@@ -62,23 +72,42 @@ export function loadPolicy(file) {
 }
 
 // Glob -> RegExp. `*` = within one path segment, `**` = across segments, `?` = one char. Everything else is literal.
-export function globToRegExp(glob) {
+// Matches at any depth (implicit leading "**/"). The "s" flag matters: file names may contain newlines.
+export function globToRegExp(glob, { caseInsensitive = false } = {}) {
   let re = "";
   for (let i = 0; i < glob.length; i++) {
     const c = glob[i];
     if (c === "*") {
-      if (glob[i + 1] === "*") { re += ".*"; i++; if (glob[i + 1] === "/") i++; }
-      else re += "[^/]*";
+      if (glob[i + 1] === "*") {
+        while (glob[i + 1] === "*") i++;
+        if (glob[i + 1] === "/") { i++; re += "(?:[^/]*/)*"; } // "**/" = zero or more directories
+        else re += ".*";
+      } else re += "[^/]*";
     } else if (c === "?") re += "[^/]";
     else re += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
   }
-  return new RegExp(`^(?:.*/)?${re}$`);
+  // Adjacent identical wildcards are redundant; collapsing them keeps matching linear (a chain of "**/" was O(n^k)).
+  re = re.replace(/(?:\(\?:\[\^\/\]\*\/\)\*){2,}/g, "(?:[^/]*/)*").replace(/(?:\.\*){2,}/g, ".*");
+  return new RegExp(`^(?:.*/)?${re}$`, caseInsensitive ? "si" : "s");
+}
+
+// Lowercase, strip one trailing dot, convert IDN to punycode. Returns "" if the name is not a plausible host.
+export function normalizeHost(host) {
+  let h = String(host).trim().toLowerCase().replace(/\.$/, "");
+  if (/^\[.*\]$/.test(h)) h = h.slice(1, -1);
+  if (h.includes(":")) return /^[0-9a-f:.]+$/.test(h) ? h : "";   // IPv6 literal
+  if (/[\/?#@\\\s%]/.test(h)) return "";   // domainToASCII() silently truncates at these ("evil.com/x" -> "evil.com")
+  const a = domainToASCII(h);
+  return /^[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?(\.[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?)*$/.test(a) ? a : "";
 }
 
 export function hostMatches(host, patterns) {
-  const h = host.toLowerCase().replace(/\.$/, "");
+  const h = normalizeHost(host);
+  if (!h) return false;
   return patterns.some((p) => {
-    const pat = p.toLowerCase();
-    return pat.startsWith("*.") ? h.endsWith(pat.slice(1)) && h.length > pat.length - 1 : h === pat;
+    const wild = p.startsWith("*.");
+    const pat = normalizeHost(wild ? p.slice(2) : p);
+    if (!pat) return false;
+    return wild ? h.endsWith("." + pat) : h === pat;
   });
 }
